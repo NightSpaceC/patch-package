@@ -1,4 +1,5 @@
 import { assertNever } from "../assertNever"
+import { BinaryPatchData } from "./binary"
 
 export interface HunkHeader {
   original: {
@@ -69,6 +70,8 @@ interface FileDeletion {
   mode: FileMode
   hunk: Hunk | null
   hash: string | null
+  binary: BinaryPatchData | null
+  reverseBinary: BinaryPatchData | null
 }
 
 interface FileCreation {
@@ -77,6 +80,19 @@ interface FileCreation {
   path: string
   hunk: Hunk | null
   hash: string | null
+  binary: BinaryPatchData | null
+  reverseBinary: BinaryPatchData | null
+}
+
+interface BinaryFilePatch {
+  type: "binary patch"
+  path: string
+  beforeHash: string | null
+  afterHash: string | null
+  /** the forward transformation */
+  binary: BinaryPatchData
+  /** the reverse transformation, if git emitted one */
+  reverseBinary: BinaryPatchData | null
 }
 
 export type PatchFilePart =
@@ -85,10 +101,11 @@ export type PatchFilePart =
   | FileCreation
   | FileRename
   | FileModeChange
+  | BinaryFilePatch
 
 export type ParsedPatchFile = PatchFilePart[]
 
-type State = "parsing header" | "parsing hunks"
+type State = "parsing header" | "parsing hunks" | "parsing binary data"
 
 interface FileDeets {
   diffLineFromPath: string | null
@@ -104,6 +121,8 @@ interface FileDeets {
   fromPath: string | null
   toPath: string | null
   hunks: Hunk[] | null
+  binary: BinaryPatchData | null
+  reverseBinary: BinaryPatchData | null
 }
 
 export interface Hunk {
@@ -126,6 +145,8 @@ const emptyFilePatch = (): FileDeets => ({
   fromPath: null,
   toPath: null,
   hunks: null,
+  binary: null,
+  reverseBinary: null,
 })
 
 const emptyHunk = (headerLine: string): Hunk => ({
@@ -179,6 +200,41 @@ function parsePatchLines(
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
 
+    if (state === "parsing binary data") {
+      const methodMatch = line.match(/^(literal|delta) (\d+)\s*$/)
+      if (methodMatch) {
+        const section: BinaryPatchData = {
+          method: methodMatch[1] as BinaryPatchData["method"],
+          size: Number(methodMatch[2]),
+          lines: [],
+        }
+        if (!currentFilePatch.binary) {
+          // the forward transformation
+          currentFilePatch.binary = section
+        } else if (!currentFilePatch.reverseBinary) {
+          // git emits a second section for the reverse transformation when
+          // it is cheap enough to compute
+          currentFilePatch.reverseBinary = section
+        } else {
+          throw new Error("Unexpected extra binary patch section: " + line)
+        }
+      } else if (line === "") {
+        // section separator, stay in binary data state in case git emitted
+        // a second (reverse) section
+      } else if (line.startsWith("diff --git ")) {
+        // end of this file's binary section(s)
+        state = "parsing header"
+        i--
+      } else if (currentFilePatch.binary && /^[A-Za-z]/.test(line)) {
+        // base85-encoded data line
+        const target = currentFilePatch.reverseBinary || currentFilePatch.binary
+        target.lines.push(line)
+      } else {
+        throw new Error("Bad binary patch data line: " + line)
+      }
+      continue
+    }
+
     if (state === "parsing header") {
       if (line.startsWith("@@")) {
         hunkStartLineIndex = i
@@ -222,6 +278,8 @@ function parsePatchLines(
         currentFilePatch.fromPath = line.slice("--- a/".length).trim()
       } else if (line.startsWith("+++ ")) {
         currentFilePatch.toPath = line.slice("+++ b/".length).trim()
+      } else if (line.startsWith("GIT binary patch")) {
+        state = "parsing binary data"
       }
     } else {
       if (supportLegacyDiffs && line.startsWith("--- a/")) {
@@ -316,6 +374,7 @@ export function interpretParsedPatchFile(files: FileDeets[]): ParsedPatchFile {
       fromPath,
       toPath,
       hunks,
+      binary,
     } = file
     const type: PatchFilePart["type"] = renameFrom
       ? "rename"
@@ -323,6 +382,8 @@ export function interpretParsedPatchFile(files: FileDeets[]): ParsedPatchFile {
       ? "file deletion"
       : newFileMode
       ? "file creation"
+      : binary
+      ? "binary patch"
       : hunks && hunks.length > 0
       ? "patch"
       : "mode change"
@@ -351,6 +412,8 @@ export function interpretParsedPatchFile(files: FileDeets[]): ParsedPatchFile {
           path,
           mode: parseFileMode(deletedFileMode!),
           hash: beforeHash,
+          binary,
+          reverseBinary: file.reverseBinary,
         })
         break
       }
@@ -365,7 +428,30 @@ export function interpretParsedPatchFile(files: FileDeets[]): ParsedPatchFile {
           path,
           mode: parseFileMode(newFileMode!),
           hash: afterHash,
+          binary,
+          reverseBinary: file.reverseBinary,
         })
+        break
+      }
+      case "binary patch": {
+        const path = toPath || diffLineToPath || fromPath
+        if (!path) {
+          throw new Error("Bad parse state: no path given for binary patch")
+        }
+        if (!binary) {
+          throw new Error(
+            "Bad parse state: binary patch without binary data section",
+          )
+        }
+        result.push({
+          type: "binary patch",
+          path,
+          beforeHash,
+          afterHash,
+          binary,
+          reverseBinary: file.reverseBinary,
+        })
+        destinationFilePath = path
         break
       }
       case "patch":

@@ -1,6 +1,7 @@
 import fs from "fs-extra"
 import { dirname, join, relative, resolve } from "path"
 import { ParsedPatchFile, FilePatch, Hunk } from "./parse"
+import { decodeBinaryPatch, gitBlobHash } from "./binary"
 import { assertNever } from "../assertNever"
 
 export const executeEffects = (
@@ -70,11 +71,13 @@ export const executeEffects = (
           }
           // todo: check file contents matches
         } else {
-          const fileContents = eff.hunk
+          const path = inCwd(eff.path)
+          const fileContents = eff.binary
+            ? decodeBinaryPatch(eff.binary, null)
+            : eff.hunk
             ? eff.hunk.parts[0].lines.join("\n") +
               (eff.hunk.parts[0].noNewlineAtEndOfFile ? "" : "\n")
             : ""
-          const path = inCwd(eff.path)
           try {
             fs.ensureDirSync(dirname(path))
             fs.writeFileSync(path, fileContents, { mode: eff.mode })
@@ -90,6 +93,41 @@ export const executeEffects = (
       case "patch":
         applyPatch(eff, { dryRun, cwd, bestEffort, errors })
         break
+      case "binary patch": {
+        const path = inCwd(eff.path)
+        const mode = fs.statSync(path).mode
+        const currentContents = fs.readFileSync(path)
+        try {
+          if (
+            eff.beforeHash &&
+            eff.beforeHash !== gitBlobHash(currentContents)
+          ) {
+            throw new Error(
+              `Binary patch was made against different file contents: ${humanReadable(
+                eff.path,
+              )}`,
+            )
+          }
+          const newContents = decodeBinaryPatch(eff.binary, currentContents)
+          if (eff.afterHash && eff.afterHash !== gitBlobHash(newContents)) {
+            throw new Error(
+              `Binary patch produced unexpected file contents: ${humanReadable(
+                eff.path,
+              )}`,
+            )
+          }
+          if (!dryRun) {
+            fs.writeFileSync(path, newContents, { mode })
+          }
+        } catch (e) {
+          if (bestEffort) {
+            errors?.push(`Failed to apply binary patch to ${eff.path}`)
+          } else {
+            throw e
+          }
+        }
+        break
+      }
       case "mode change":
         const currentMode = fs.statSync(inCwd(eff.path)).mode
         if (

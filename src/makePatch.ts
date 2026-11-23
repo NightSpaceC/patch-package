@@ -313,6 +313,7 @@ export function makePatch({
     // get diff of changes
     const diffResult = git(
       "diff",
+      "--binary",
       "--cached",
       "--no-color",
       "--ignore-space-at-eol",

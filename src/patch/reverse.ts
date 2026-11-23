@@ -68,6 +68,8 @@ function reversePatchPart(part: PatchFilePart): PatchFilePart {
         hash: part.hash,
         hunk: part.hunk && reverseHunk(part.hunk),
         mode: part.mode,
+        binary: null,
+        reverseBinary: part.binary,
       }
     case "file deletion":
       return {
@@ -76,6 +78,10 @@ function reversePatchPart(part: PatchFilePart): PatchFilePart {
         hunk: part.hunk && reverseHunk(part.hunk),
         mode: part.mode,
         hash: part.hash,
+        // for a deleted binary file, the reverse section encodes the
+        // deleted content, which is what re-creating the file needs
+        binary: part.reverseBinary,
+        reverseBinary: part.binary,
       }
     case "rename":
       return {
@@ -97,6 +103,22 @@ function reversePatchPart(part: PatchFilePart): PatchFilePart {
         path: part.path,
         newMode: part.oldMode,
         oldMode: part.newMode,
+      }
+    case "binary patch":
+      if (!part.reverseBinary) {
+        throw new Error(
+          "Cannot reverse a binary patch: the git binary patch format only " +
+            "encodes the forward direction for this file. Reinstall " +
+            "node_modules to undo it.",
+        )
+      }
+      return {
+        type: "binary patch",
+        path: part.path,
+        beforeHash: part.afterHash,
+        afterHash: part.beforeHash,
+        binary: part.reverseBinary,
+        reverseBinary: part.binary,
       }
   }
 }
