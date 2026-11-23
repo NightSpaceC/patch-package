@@ -178,9 +178,16 @@ delta 5
     expect(() => parsePatchFile(badPatch)).toThrow("Bad binary patch data line")
   })
 
-  it("decodes base85 lines including the z shorthand", () => {
-    // 'z' at the start of a group expands to four zero bytes.
-    expect(decodeBase85Lines(["Az"])).toEqual(Buffer.from([0]))
-    expect(decodeBase85Lines(["Ezzzz"])).toEqual(Buffer.from([0, 0, 0, 0, 0]))
+  it("treats 'z' as an ordinary base85 digit (git decode_85 semantics)", () => {
+    // 'z' has value 61 in git's base85 alphabet; a group may START with it:
+    // "z0000" = 0xbdcb9e2d. The old (incorrect) z-shorthand decoding turned
+    // this into four zero bytes, corrupting real-world patches.
+    expect(decodeBase85Lines(["Az0000"])).toEqual(Buffer.from([0xbd]))
+    expect(decodeBase85Lines(["Dz0000"])).toEqual(
+      Buffer.from([0xbd, 0xcb, 0x9e, 0x2d]),
+    )
+    // a group that overflows 32 bits is rejected, as in git's decode_85
+    // ("|NsC1" = 4294967296 = 2^32)
+    expect(() => decodeBase85Lines(["A|NsC1"])).toThrow("Invalid base85 sequence")
   })
 })

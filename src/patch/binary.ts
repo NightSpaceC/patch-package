@@ -35,8 +35,9 @@ function decodeBase85Char(c: string): number {
  *
  * Each line starts with a length character: 'A'-'Z' encodes 1-26 bytes,
  * 'a'-'z' encodes 27-52 bytes. The rest of the line consists of 5-character
- * base85 groups encoding 4 bytes each. The character 'z' can appear in place
- * of a 5-character group and expands to four zero bytes.
+ * base85 groups encoding 4 bytes each (big-endian). Note that 'z' is an
+ * ordinary digit of git's base85 alphabet (value 61) — it has no special
+ * meaning inside data lines, mirroring git's decode_85().
  */
 export function decodeBase85Lines(lines: string[]): Buffer {
   const chunks: Buffer[] = []
@@ -54,11 +55,6 @@ export function decodeBase85Lines(lines: string[]): Buffer {
     const bytes: number[] = []
     let i = 1
     while (bytes.length < numBytes) {
-      if (line[i] === "z") {
-        bytes.push(0, 0, 0, 0)
-        i += 1
-        continue
-      }
       let acc = 0
       for (let j = 0; j < 5; j++) {
         const c = line[i + j]
@@ -68,6 +64,11 @@ export function decodeBase85Lines(lines: string[]): Buffer {
         acc = acc * 85 + decodeBase85Char(c)
       }
       i += 5
+      // git's decode_85 rejects groups that overflow 32 bits; a wrapped
+      // decode would silently corrupt the deflate stream downstream.
+      if (acc > 0xffffffff) {
+        throw new Error(`Invalid base85 sequence: '${line.slice(i - 6, i - 1)}'`)
+      }
       // tslint:disable-next-line:no-bitwise
       bytes.push(
         (acc >>> 24) & 0xff,
